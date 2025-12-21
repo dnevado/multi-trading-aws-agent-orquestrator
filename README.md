@@ -80,9 +80,3 @@ Testing & CI suggestions
 
 Security & Safety
 - This example intentionally prints orders — do not enable live execution without proper authentication and safeguards.
-
-Contact / Next steps
-- If you want, I can:
-  - add a `requirements.txt` or `pyproject.toml` and a simple test harness,
-  - convert execution stub to a pluggable broker interface,
-  - containerize the demo for CI.
