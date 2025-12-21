@@ -123,15 +123,15 @@ Project checklist & next tasks
 - [ ] Add CI workflow (GitHub Actions) with JDK/Python matrix if needed
 - [ ] Containerize demo (`Dockerfile`) for reproducible CI runs
 
-Quick commands for testing
+Quick commands for testing 
 
 ```bash
-# run unit tests (after adding tests)
+# run unit tests (after adding tests) 
 pytest -q
 
 # run script locally
-python agentcore.py
+python agentcore.py  
 ```
-
+ 
 Security & Safety
-- This example intentionally prints orders — do not enable live execution without proper authentication and safeguards. 
+- This example intentionally prints orders — do not enable live execution without proper authentication and safeguards.  
