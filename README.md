@@ -129,7 +129,7 @@ Quick commands for testing
 # run unit tests (after adding tests) 
 pytest -q
 
-# run script locally
+# run script locally (pending to add venv and install deps)
 python agentcore.py  
 ```
  
