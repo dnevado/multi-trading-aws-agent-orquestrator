@@ -1,5 +1,14 @@
 # Multi-Agent Daily Trading Demo
 
+> Status: ✅ Ready for local testing  •  ⚠️ Not production-ready
+
+| Component | Status |
+|---|---:|
+| Core demo script (`agentcore.py`) | ✅ tested locally |
+| README & docs | ✅ complete |
+| Requirements file | ✅ added |
+| CI / Container | ⚪ not added |
+
 This repository contains a small educational multi-agent trading workflow implemented in `agentcore.py`. It uses a Strands-style multi-agent graph where each agent runs a single tool (pure Python functions) to fetch market data, compute signals, combine risk logic, build a portfolio plan, and produce execution orders (stub).
 
 **Purpose**: demonstrate how to orchestrate multiple agents/tools for a daily (EOD) trading workflow for two symbols (AAPL, GOOGL). Not production-ready — intended for learning and prototyping.
@@ -22,13 +31,34 @@ Key tools implemented:
 - `build_portfolio_plan` — allocates capital to approved trades and constructs an order list.
 - `execute_trades_stub` — prints orders to stdout (replace with broker API integration in production).
 
-How the graph flows:
-- `market_data` -> (`technical`, `fundamentals`, `sentiment`) -> `risk` -> `portfolio` -> `execution`.
-`risk` waits for all three upstream nodes to complete before executing.
+How the graph flows (simplified):
+
+market_data
+  ↓
+  ├─> technical
+  ├─> fundamentals
+  └─> sentiment
+     ↓
+     (wait for all) → risk → portfolio → execution
+
+Mermaid flow (rendered where supported):
+
+```mermaid
+flowchart TD
+  A[market_data] --> B[technical]
+  A --> C[fundamentals]
+  A --> D[sentiment]
+  B --> E[risk]
+  C --> E
+  D --> E
+  E --> F[portfolio]
+  F --> G[execution]
+```
 
 Prerequisites
-- Python 3.10+ (tested with 3.11+ recommended)
-- Pip packages: `numpy`, `pandas`, `yfinance`, `strands` (project-specific), `strands-multiagent` if separate
+- **Python**: 3.10+ (3.11 recommended)
+- **Pip packages**: `numpy`, `pandas`, `yfinance`, `strands` (project-specific)
+- The project includes `requirements.txt` for quick setup.
 
 Install dependencies (example):
 ```bash
@@ -39,8 +69,17 @@ pip install numpy pandas yfinance
 # Install your internal Strands package as appropriate
 ```
 
-Running the demo
-1. (Optional) Set AWS model environment if you plan to use Bedrock/LLM model backends:
+Running the demo (quick)
+
+1. Create and activate a virtualenv, install requirements:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate   # or `.venv\Scripts\activate` on Windows
+pip install -r requirements.txt
+```
+
+2. (Optional) Set AWS model environment if using LLM backends (Bedrock):
 
 PowerShell example:
 ```powershell
@@ -54,7 +93,8 @@ export AWS_PROFILE=your_profile
 export AWS_REGION=eu-central-1
 ```
 
-2. Run the script:
+3. Run the script:
+
 ```bash
 python agentcore.py
 ```
@@ -74,9 +114,24 @@ Customization & Extension
 - Add more advanced risk models and position-sizing logic.
 - Plug in a Bedrock or other LLM model by passing `model_id` into `make_agents(model_id=...)` to run agent reasoning on a model.
 
-Testing & CI suggestions
-- Add unit tests for the tools using small DataFrame fixtures.
-- Add an integration smoke test that runs `main()` with a small `lookback_days` and asserts the produced `trade_plan` has correct structure.
+Project checklist & next tasks
+
+- [x] Code explanation and architecture notes
+- [x] `README.md` with usage and configuration
+- [x] `requirements.txt` added
+- [ ] Add unit tests for tools (`pytest`)
+- [ ] Add CI workflow (GitHub Actions) with JDK/Python matrix if needed
+- [ ] Containerize demo (`Dockerfile`) for reproducible CI runs
+
+Quick commands for testing
+
+```bash
+# run unit tests (after adding tests)
+pytest -q
+
+# run script locally
+python agentcore.py
+```
 
 Security & Safety
-- This example intentionally prints orders — do not enable live execution without proper authentication and safeguards.
+- This example intentionally prints orders — do not enable live execution without proper authentication and safeguards. 
