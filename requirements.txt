@@ -7,3 +7,5 @@ strands>=0.1.0
 
 # Optional / dev
 pytest>=7.0
+requests
+load_dotenv

@@ -17,6 +17,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional
+from dotenv import load_dotenv
+import requests 
+
+from openai import OpenAI
 
 import numpy as np
 import pandas as pd
@@ -29,10 +33,13 @@ from strands.multiagent.base import Status
 
 import os
 
+load_dotenv()
+
 
 os.environ['AWS_PROFILE'] = 'default'
 os.environ['AWS_REGION'] = 'eu-central-1'  # Use a region where you have model access
-
+API_KEY_FINANCIAL_DATA  = os.getenv("FMP_API_KEY")
+BASE_FINANCIAL_DATA = "https://financialmodelingprep.com/api/v3"
 
 share_list = ["AAPL", "GOOGL"]  # default list
 Action = Literal["BUY", "SELL", "HOLD"]
@@ -50,6 +57,36 @@ def all_dependencies_complete(required_nodes: List[str]):
             for node_id in required_nodes
         )
     return check_all_complete
+
+
+
+def get_json(url):
+    r = requests.get(url, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+def get_fundamentals(ticker: str) -> dict:
+    income = get_json(f"{BASE_FINANCIAL_DATA}/income-statement/{ticker}?limit=1&apikey={API_KEY_FINANCIAL_DATA}")[0]
+    balance = get_json(f"{BASE_FINANCIAL_DATA}/balance-sheet-statement/{ticker}?limit=1&apikey={API_KEY_FINANCIAL_DATA}")[0]
+    cashflow = get_json(f"{BASE_FINANCIAL_DATA}/cash-flow-statement/{ticker}?limit=1&apikey={API_KEY_FINANCIAL_DATA}")[0]
+    profile = get_json(f"{BASE_FINANCIAL_DATA}/profile/{ticker}?apikey={API_KEY_FINANCIAL_DATA}")[0]
+
+    fundamentals = {
+        "ticker": ticker.upper(),
+        "fiscal_date": income["date"],
+        "currency": income["reportedCurrency"],
+
+        "revenue": float(income["revenue"]),
+        "net_income": float(income["netIncome"]),
+        "free_cash_flow": float(cashflow["freeCashFlow"]),
+
+        "total_assets": float(balance["totalAssets"]),
+        "total_liabilities": float(balance["totalLiabilities"]),
+
+        "market_cap": float(profile["mktCap"]),
+        "pe_ratio": float(profile["pe"]),
+        "eps": float(profile["eps"]),
+    }
 
 
 # -----------------------------
@@ -77,11 +114,11 @@ def rsi(close: pd.Series, period: int = 14) -> pd.Series:
 def fetch_daily_closes(tool_context: ToolContext) -> Dict[str, Any]:
     """
     Market Data Tool:
-    Fetch daily close prices for configured symbols (defaults: AAPL, GOOGL).
+    Fetch daily close prices for configured symbols (defaults: share_list).
     Stores a DataFrame of closes in invocation_state["closes_df"].
     """
     state = tool_context.invocation_state
-    symbols: List[str] = state.get("symbols", ["AAPL", "GOOGL"])
+    symbols: List[str] = state.get("symbols", share_list)
     lookback_days: int = int(state.get("lookback_days", 200))
 
     # Pull a wider calendar window to ensure we have enough trading days.
@@ -201,6 +238,28 @@ def compute_technical_signals(tool_context: ToolContext) -> Dict[str, Any]:
     return {"as_of": as_of, "tech_signals": results}
 
 
+def get_fundamental_bias_from_llm(fundamental_indicators:str) -> str:
+    openai = OpenAI()
+    prompt_bias = """
+    You are a financial analyst.
+    Based ONLY on the following fundamentals, classify the stock provided below  as:
+    BUY, NEUTRAL  or SELL.
+       
+    {fundamental_indicators}
+    """ 
+    messages = [{"role": "user", "content": prompt_bias}]
+    
+    response = openai.chat.completions.create(
+        model="gpt-4.1-nano",
+        messages=messages
+    )
+
+    print(response.choices[0].message.content)
+    
+    return  response.choices[0].message.content
+
+
+
 @tool(context=True)
 def compute_fundamentals_bias(tool_context: ToolContext) -> Dict[str, Any]:
     """
@@ -213,8 +272,16 @@ def compute_fundamentals_bias(tool_context: ToolContext) -> Dict[str, Any]:
     if closes is None:
         raise RuntimeError("Missing closes_df in invocation_state. Run Market Data first.")
 
-    as_of = str(closes.index[-1].date())
-    bias = [{"symbol": sym, "as_of": as_of, "bias": "NEUTRAL", "note": "Placeholder fundamentals"} for sym in closes.columns]
+    as_of = str(closes.index[-1].date())    
+    bias = []
+    for sym in closes.columns:
+        fundamental_indicators = get_fundamentals(sym)
+        # GET bias from LLM CALL 
+        fundamental_bias = get_fundamental_bias_from_llm(fundamental_indicators)
+        bias.append({"symbol": sym, "as_of": as_of, "bias": fundamental_bias , "note" : fundamental_indicators}) 
+    
+    #  "bias": response.choices[0].message.content, "note": fundamental_indicators
+    #bias = [{"symbol": sym, "as_of": as_of, "bias": get_fundamental_bias_from_llm , "note" : "PlaceHolder Analysys"} for sym in closes.columns]
 
     state["fund_bias"] = bias
     return {"as_of": as_of, "fundamentals": bias}
@@ -563,4 +630,11 @@ if __name__ == "__main__":
     if not shares:
         shares = "AAPL,GOOGL"  # default
     share_list = [share.strip() for share in shares.split(",") if share.strip()]
+    openai_api_key = os.getenv('OPENAI_API_KEY')
+
+    if openai_api_key:
+        print(f"La clave API de OpenAI existe y empieza por {openai_api_key[:8]}")
+    else:
+        print("La clave API de OpenAI no existe - Dirígete a la guía de solución de problemas en la carpeta de configuración.")
+    
     main()
