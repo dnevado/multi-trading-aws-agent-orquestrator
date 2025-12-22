@@ -30,11 +30,11 @@ from strands.multiagent.base import Status
 import os
 
 
-os.environ['AWS_PROFILE'] = 'dnevadopersonal'
+os.environ['AWS_PROFILE'] = 'default'
 os.environ['AWS_REGION'] = 'eu-central-1'  # Use a region where you have model access
 
 
-
+share_list = ["AAPL", "GOOGL"]  # default list
 Action = Literal["BUY", "SELL", "HOLD"]
 Bias = Literal["BULLISH", "BEARISH", "NEUTRAL"] 
 
@@ -529,7 +529,7 @@ def build_graph(agents: Dict[str, Agent]):
 def main():
     # Shared state (passed behind the scenes to all agents/tools)
     shared_state = {
-        "symbols": ["AAPL", "GOOGL"],     # "GOOG" also valid, but we pick GOOGL explicitly
+        "symbols": share_list,     # "GOOG" also valid, but we pick GOOGL explicitly
         "lookback_days": 200,
         "capital": 100_000,
         "max_position_pct": 0.10,        # 10% cap per stock
@@ -543,7 +543,7 @@ def main():
     graph = build_graph(agents)
 
     result = graph(
-        "Run the daily (EOD) trading workflow for AAPL and GOOGL using close prices only.",
+        f"Run the daily (EOD) trading workflow for {share_list} using close prices only.",
         invocation_state=shared_state,
     )
 
@@ -556,4 +556,11 @@ def main():
 
 
 if __name__ == "__main__":
+    # GET imput  parameters from user as a list of stock share      
+    # and pass them to main function
+    # For now, we keep it static                               
+    shares = input("Enter a list of stock shares separated by commas (e.g., AAPL,GOOGL,MSFT): ")
+    if not shares:
+        shares = "AAPL,GOOGL"  # default
+    share_list = [share.strip() for share in shares.split(",") if share.strip()]
     main()
