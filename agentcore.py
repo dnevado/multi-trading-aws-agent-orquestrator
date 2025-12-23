@@ -33,17 +33,261 @@ from strands.multiagent.base import Status
 
 import os
 
+import re
+from dataclasses import dataclass
+from typing import List, Dict, Literal
+
+import requests
+import feedparser
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+
+
 load_dotenv()
+
+
+# -----------------------
+# Prompts (force 1-word output)
+# -----------------------
+SYSTEM_PROMPT = """You are a professional financial sentiment analyst.
+Analyze ONLY the sentiment expressed in the provided text samples.
+Ignore fundamentals, valuation, macro, and any external knowledge.
+
+Output MUST be EXACTLY one word:
+BULLISH
+NEUTRAL
+BEARISH
+No other text.
+"""
+
+#Signal = Literal["BUY", "NEUTRAL", "SELL"]
+Signal = Literal["BULLISH", "NEUTRAL", "BEARISH"]
 
 
 os.environ['AWS_PROFILE'] = 'default'
 os.environ['AWS_REGION'] = 'eu-central-1'  # Use a region where you have model access
 API_KEY_FINANCIAL_DATA  = os.getenv("FMP_API_KEY")
-BASE_FINANCIAL_DATA = "https://financialmodelingprep.com/api/v3"
+BASE_FINANCIAL_DATA = "https://financialmodelingprep.com/stable" # /api/v3"
 
 share_list = ["AAPL", "GOOGL"]  # default list
 Action = Literal["BUY", "SELL", "HOLD"]
 Bias = Literal["BULLISH", "BEARISH", "NEUTRAL"] 
+openai_api_key = ""
+
+
+
+def make_user_prompt(ticker: str, social_texts: List[str]) -> str:
+    bullets = "\n".join(f"- {t}" for t in social_texts[:120])  # cap tokens
+    return f"""Ticker: {ticker}
+
+Social/forum sentiment samples (most recent first):
+{bullets}
+
+Rules:
+- BUY: strong bullish tone, optimism, hype, accumulation, confidence
+- SELL: strong bearish tone, fear, panic, capitulation, distribution
+- NEUTRAL: mixed, unclear, low conviction
+
+Return ONLY one word: BULLISH, NEUTRAL, or BEARISH.
+"""
+
+# -----------------------
+# Data sources (NO REDDIT)
+# -----------------------
+TICKER_RE = re.compile(r"[^A-Z0-9\.\-]")
+
+def normalize_ticker(ticker: str) -> str:
+    return TICKER_RE.sub("", ticker.strip().upper())
+
+def fetch_stocktwits(ticker: str, limit: int = 60) -> List[str]:
+    t = normalize_ticker(ticker)
+    url = f"https://api.stocktwits.com/api/2/streams/symbol/{t}.json"
+    headers = {
+        "User-Agent": "sentiment-research/1.0 (personal use)",
+        "Accept": "application/json,text/plain,*/*",
+        "Referer": "https://stocktwits.com/",
+        "Origin": "https://stocktwits.com",
+    }
+    r = requests.get(url, headers=headers, timeout=20)
+
+    # Cloudflare challenge detection (cf-mitigated: challenge)
+    if r.headers.get("cf-mitigated", "").lower() == "challenge":
+        print("StockTwits blocked by Cloudflare challenge. Skipping StockTwits.")
+        return []
+
+    # Some blocks return HTML instead of JSON
+    if "text/html" in (r.headers.get("Content-Type", "") or "").lower():
+        print("StockTwits returned HTML (likely block page). Skipping StockTwits.")
+        return []
+
+    if r.status_code == 403:
+        print("StockTwits 403 Forbidden. Skipping StockTwits.")
+        return []
+    r.raise_for_status()
+    data = r.json()
+    out: List[str] = []
+    for msg in (data.get("messages") or [])[:limit]:
+        body = (msg.get("body") or "").strip()
+        if body:
+            out.append(body)
+    return out
+
+def fetch_google_news_rss(ticker: str, limit: int = 40) -> List[str]:
+    q = requests.utils.quote(f"{ticker} stock")
+    rss_url = f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
+    feed = feedparser.parse(rss_url)
+    out: List[str] = []
+    for e in feed.entries[:limit]:
+        title = (getattr(e, "title", "") or "").strip()
+        summary = (getattr(e, "summary", "") or "").strip()
+        txt = " | ".join([x for x in [title, summary] if x])
+        if txt:
+            out.append(txt)
+    return out
+
+def fetch_finviz_rss(ticker: str, limit: int = 40) -> List[str]:
+    t = normalize_ticker(ticker)
+    rss_url = f"https://finviz.com/rss.ashx?t={t}"
+    feed = feedparser.parse(rss_url)
+    out: List[str] = []
+    for e in feed.entries[:limit]:
+        title = (getattr(e, "title", "") or "").strip()
+        summary = (getattr(e, "summary", "") or "").strip()
+        txt = " | ".join([x for x in [title, summary] if x])
+        if txt:
+            out.append(txt)
+    return out
+
+# -----------------------
+# Hybrid scorer
+# -----------------------
+@dataclass
+class HybridOutput:
+    ticker: str
+    signal: Signal
+    vader_mean: float
+    vader_bucket: int
+    llm_label: Signal
+    llm_bucket: int
+    hybrid_score: float
+    counts: Dict[str, int]
+
+class HybridSentiment:
+    def __init__(
+        self,
+        model: str = "gpt-4o-mini",
+        w_vader: float = 0.60,
+        w_llm: float = 0.40,
+        vader_pos_th: float = 0.12,
+        vader_neg_th: float = -0.12,
+        final_buy_th: float = 0.35,
+        final_sell_th: float = -0.35,
+    ):
+        self.client = OpenAI(api_key=openai_api_key)
+        self.model = model
+        self.w_vader = w_vader
+        self.w_llm = w_llm
+        self.vader_pos_th = vader_pos_th
+        self.vader_neg_th = vader_neg_th
+        self.final_buy_th = final_buy_th
+        self.final_sell_th = final_sell_th
+        self.analyzer = SentimentIntensityAnalyzer()
+
+    def _vader_mean(self, texts: List[str]) -> float:
+        if not texts:
+            return 0.0
+        scores = [self.analyzer.polarity_scores(t)["compound"] for t in texts]
+        return sum(scores) / len(scores)
+
+    def _vader_bucket(self, mean: float) -> int:
+        if mean >= self.vader_pos_th:
+            return 1
+        if mean <= self.vader_neg_th:
+            return -1
+        return 0
+
+    def _llm_label(self, ticker: str, texts: List[str]) -> Signal:
+        resp = self.client.chat.completions.create(
+            model=self.model,
+            temperature=0.0,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": make_user_prompt(ticker, texts)},
+            ],
+        )
+        out = resp.choices[0].message.content.strip().upper()
+        # Return ONLY one word: BULLISH, NEUTRAL, or BEARISH.
+        return out if out in ("BULLISH", "NEUTRAL", "BEARISH") else "NEUTRAL"  # hard-guard
+
+    @staticmethod
+    def _label_to_bucket(label: Signal) -> int:
+        return {"BULLISH": 1, "NEUTRAL": 0, "BEARISH": -1}[label]
+
+    def _final_label(self, hybrid_score: float) -> Signal:
+        if hybrid_score >= self.final_buy_th:
+            return "BULLISH"
+        if hybrid_score <= self.final_sell_th:
+            return "BEARISH"
+        return "NEUTRAL"
+
+    def score(self, ticker: str, social_texts: List[str], vader_texts: List[str]) -> HybridOutput:
+        # VADER runs on broader text (social + headlines) for stability
+        v_mean = self._vader_mean(vader_texts)
+        v_bucket = self._vader_bucket(v_mean)
+
+        # LLM runs on social only (better reflects “crowd mood”)
+        llm = self._llm_label(ticker, social_texts + vader_texts)
+        l_bucket = self._label_to_bucket(llm)
+
+        # Disagreement safety
+        opposite = (v_bucket == 1 and l_bucket == -1) or (v_bucket == -1 and l_bucket == 1)
+        very_strong_vader = abs(v_mean) >= 0.35
+
+        if opposite and not very_strong_vader:
+            hybrid_score = 0.0
+            final = "NEUTRAL"
+        else:
+            hybrid_score = self.w_vader * v_bucket + self.w_llm * l_bucket
+            final = self._final_label(hybrid_score)
+
+        return HybridOutput(
+            ticker=ticker,
+            signal=final,
+            vader_mean=v_mean,
+            vader_bucket=v_bucket,
+            llm_label=llm,
+            llm_bucket=l_bucket,
+            hybrid_score=hybrid_score,
+            counts={"social": len(social_texts), "vader_texts": len(vader_texts)},
+        )
+
+# -----------------------
+# Runner
+# -----------------------
+def get_signal(ticker: str) -> HybridOutput:
+    t = normalize_ticker(ticker)
+
+    social = []
+    try:
+        social = fetch_stocktwits(t, limit=60)
+    except Exception as e:
+        print   (f"Error fetching StockTwits data {e}" )    
+        social = []
+
+    headlines = []
+    try:
+        headlines += fetch_google_news_rss(t, limit=40)
+    except Exception:
+        pass
+    try:
+        headlines += fetch_finviz_rss(t, limit=40)
+    except Exception:
+        pass
+
+    # VADER sees everything; LLM sees only social
+    vader_texts = social + headlines
+
+    hs = HybridSentiment()
+    return hs.score(t, social_texts=social, vader_texts=vader_texts)
 
 
 # -----------------------------
@@ -66,27 +310,37 @@ def get_json(url):
     return r.json()
 
 def get_fundamentals(ticker: str) -> dict:
-    income = get_json(f"{BASE_FINANCIAL_DATA}/income-statement/{ticker}?limit=1&apikey={API_KEY_FINANCIAL_DATA}")[0]
-    balance = get_json(f"{BASE_FINANCIAL_DATA}/balance-sheet-statement/{ticker}?limit=1&apikey={API_KEY_FINANCIAL_DATA}")[0]
-    cashflow = get_json(f"{BASE_FINANCIAL_DATA}/cash-flow-statement/{ticker}?limit=1&apikey={API_KEY_FINANCIAL_DATA}")[0]
-    profile = get_json(f"{BASE_FINANCIAL_DATA}/profile/{ticker}?apikey={API_KEY_FINANCIAL_DATA}")[0]
 
-    fundamentals = {
-        "ticker": ticker.upper(),
-        "fiscal_date": income["date"],
-        "currency": income["reportedCurrency"],
+    print ("***** get_fundamentals:******")
+    fundamentals = {}
+    try:
 
-        "revenue": float(income["revenue"]),
-        "net_income": float(income["netIncome"]),
-        "free_cash_flow": float(cashflow["freeCashFlow"]),
+        income = get_json(f"{BASE_FINANCIAL_DATA}/income-statement?symbol={ticker}&limit=1&apikey={API_KEY_FINANCIAL_DATA}")[0]
+        balance = get_json(f"{BASE_FINANCIAL_DATA}/balance-sheet-statement?symbol={ticker}&limit=1&apikey={API_KEY_FINANCIAL_DATA}")[0]
+        cashflow = get_json(f"{BASE_FINANCIAL_DATA}/cash-flow-statement?symbol={ticker}&limit=1&apikey={API_KEY_FINANCIAL_DATA}")[0]
+        profile = get_json(f"{BASE_FINANCIAL_DATA}/profile?symbol={ticker}&apikey={API_KEY_FINANCIAL_DATA}")[0]
 
-        "total_assets": float(balance["totalAssets"]),
-        "total_liabilities": float(balance["totalLiabilities"]),
+        fundamentals = {
+            "ticker": ticker.upper(),
+            "fiscal_date": income["date"],
+            "currency": income["reportedCurrency"],
 
-        "market_cap": float(profile["mktCap"]),
-        "pe_ratio": float(profile["pe"]),
-        "eps": float(profile["eps"]),
-    }
+            "revenue": float(income["revenue"]),
+            "net_income": float(income["netIncome"]),
+            "free_cash_flow": float(cashflow["freeCashFlow"]),
+
+            "total_assets": float(balance["totalAssets"]),
+            "total_liabilities": float(balance["totalLiabilities"]),
+
+            "market_cap": float(profile["marketCap"])
+            # Does not exist 
+            # "pe_ratio": float(profile["pe"]),
+            # "eps": float(profile["eps"]),
+        }
+        print (f"***** end get_fundamentals:{fundamentals}******")
+    except Exception as e:
+        print(f"Error fetching fundamentals for {ticker}: {e}")
+    return fundamentals
 
 
 # -----------------------------
@@ -238,33 +492,82 @@ def compute_technical_signals(tool_context: ToolContext) -> Dict[str, Any]:
     return {"as_of": as_of, "tech_signals": results}
 
 
-def get_fundamental_bias_from_llm(fundamental_indicators:str) -> str:
-    openai = OpenAI()
-    prompt_bias = """
-    You are a financial analyst.
-    Based ONLY on the following fundamentals, classify the stock provided below  as:
-    BUY, NEUTRAL  or SELL.
-       
-    {fundamental_indicators}
-    """ 
-    messages = [{"role": "user", "content": prompt_bias}]
-    
-    response = openai.chat.completions.create(
-        model="gpt-4.1-nano",
-        messages=messages
-    )
+def get_fundamental_bias_from_llm(fundamental_indicators: Any) -> str:
+    """
+    Call LLM to classify fundamentals into one of: BULLISH, NEUTRAL, BEARISH.
+    Robustly handle different response shapes:
+      - If LLM returns JSON with a 'classification' field -> use it
+      - If LLM returns plain text -> extract the keyword
+      - On error -> return "NEUTRAL"
+    """
+    valid = {"BULLISH", "NEUTRAL", "BEARISH"}
+    schema = {
+        "name": "llm_fundamental_analysis_result",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "ticker": {"type": "string"},
+                "classification": {"type": "string"}       # BEARISH, BULLISH, NEUTRAL
+            },
+            "required": ["ticker", "classification"]
+        }
+    }
 
-    print(response.choices[0].message.content)
-    
-    return  response.choices[0].message.content
+    try:
+        openai = OpenAI(api_key=openai_api_key)
+        ticker = (fundamental_indicators.get("ticker") if isinstance(fundamental_indicators, dict) else None) or "MSFT"
+        prompt_bias = f"""
+        You are a financial analyst.
+        Based ONLY on the following fundamentals, classify the stock {ticker} for a likely investment over the next 7 days.
+        Provide your answer as one of these exact words: BULLISH, NEUTRAL, BEARISH. The fundamentals are:
+        {fundamental_indicators}
+        """
 
+        messages = [{"role": "user", "content": prompt_bias}]
+        response = openai.chat.completions.create(
+            model="gpt-4.1-nano",
+            response_format={"type": "json_schema", "json_schema": schema},
+            messages=messages
+        )
+
+        raw_content = response.choices[0].message.content
+
+        # Normalize different possible response types
+        candidate = None
+        if isinstance(raw_content, dict):
+            # If the SDK already parsed JSON
+            candidate = raw_content.get("classification") or raw_content.get("Classification")
+        else:
+            # raw_content might be a JSON string or plain text
+            text = (str(raw_content) or "").strip()
+            # Try JSON parse
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    candidate = parsed.get("classification") or parsed.get("Classification")
+            except Exception:
+                # Fallback: search for the keyword in text
+                for k in valid:
+                    if k in text.upper():
+                        candidate = k
+                        break
+
+        if candidate:
+            out = candidate.strip().upper()
+            return out if out in valid else "NEUTRAL"
+
+    except Exception as e:
+        print(f"Error in LLM call for fundamental bias: {e}")
+
+    return "NEUTRAL"  # default on error or unrecognized output
 
 
 @tool(context=True)
 def compute_fundamentals_bias(tool_context: ToolContext) -> Dict[str, Any]:
     """
     Fundamentals Tool (kept intentionally simple):
-    Returns NEUTRAL bias for each symbol (placeholder).
     Stores results in invocation_state["fund_bias"].
     """
     state = tool_context.invocation_state
@@ -272,16 +575,18 @@ def compute_fundamentals_bias(tool_context: ToolContext) -> Dict[str, Any]:
     if closes is None:
         raise RuntimeError("Missing closes_df in invocation_state. Run Market Data first.")
 
-    as_of = str(closes.index[-1].date())    
+    as_of = str(closes.index[-1].date())
     bias = []
     for sym in closes.columns:
         fundamental_indicators = get_fundamentals(sym)
-        # GET bias from LLM CALL 
-        fundamental_bias = get_fundamental_bias_from_llm(fundamental_indicators)
-        bias.append({"symbol": sym, "as_of": as_of, "bias": fundamental_bias , "note" : fundamental_indicators}) 
-    
-    #  "bias": response.choices[0].message.content, "note": fundamental_indicators
-    #bias = [{"symbol": sym, "as_of": as_of, "bias": get_fundamental_bias_from_llm , "note" : "PlaceHolder Analysys"} for sym in closes.columns]
+        # GET bias from LLM CALL (robust single-word string)
+        classification = get_fundamental_bias_from_llm(fundamental_indicators)
+        # Ensure safe fallback and normalization
+        classification = (classification or "NEUTRAL").strip().upper()
+        if classification not in ("BULLISH", "NEUTRAL", "BEARISH"):
+            classification = "NEUTRAL"
+
+        bias.append({"symbol": sym, "as_of": as_of, "bias": classification, "note": fundamental_indicators})
 
     state["fund_bias"] = bias
     return {"as_of": as_of, "fundamentals": bias}
@@ -304,11 +609,13 @@ def compute_sentiment_bias(tool_context: ToolContext) -> Dict[str, Any]:
     as_of = str(closes.index[-1].date())
     out = []
     for sym in closes.columns:
-        s = closes[sym].dropna()
-        m5 = float(s.pct_change(5).iloc[-1]) if len(s) > 6 else 0.0
-        bias: Bias = "BULLISH" if m5 > 0.01 else ("BEARISH" if m5 < -0.01 else "NEUTRAL")
-        out.append({"symbol": sym, "as_of": as_of, "bias": bias, "proxy": "5d_return", "value": m5})
 
+        sentimentAnalysys_bias = get_signal(sym)
+        # s = closes[sym].dropna()
+        #m5 = float(s.pct_change(5).iloc[-1]) if len(s) > 6 else 0.0
+        #bias: Bias = "BULLISH" if m5 > 0.01 else ("BEARISH" if m5 < -0.01 else "NEUTRAL")
+        #bias = sentimentAnalysys_bias.signal
+        out.append({"symbol": sym, "as_of": as_of, "bias": sentimentAnalysys_bias.signal}) # , "proxy": "5d_return", "value": m5})
     state["sent_bias"] = out
     return {"as_of": as_of, "sentiment": out}
 
@@ -630,7 +937,7 @@ if __name__ == "__main__":
     if not shares:
         shares = "AAPL,GOOGL"  # default
     share_list = [share.strip() for share in shares.split(",") if share.strip()]
-    openai_api_key = os.getenv('OPENAI_API_KEY')
+    openai_api_key = input("Enter a OpenAI API Key: ")
 
     if openai_api_key:
         print(f"La clave API de OpenAI existe y empieza por {openai_api_key[:8]}")
@@ -638,3 +945,7 @@ if __name__ == "__main__":
         print("La clave API de OpenAI no existe - Dirígete a la guía de solución de problemas en la carpeta de configuración.")
     
     main()
+
+    # out = get_signal("AAPL")
+    # print(out)
+    # print("FINAL SIGNAL:", out.signal)
