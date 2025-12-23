@@ -25,11 +25,7 @@ This repository contains a small educational multi-agent trading workflow implem
 Key tools implemented:
 - `fetch_daily_closes` — downloads historical daily closes (via `yfinance`) and stores a DataFrame under `invocation_state['closes_df']`.
 - `compute_technical_signals` — computes SMA20, SMA50, RSI14 and a simple momentum signal per symbol.
-- `compute_fundamentals_bias` — placeholder returning a neutral fundamentals bias.
-- `compute_sentiment_bias` — very simple proxy sentiment by 5-day returns.
-- `risk_gatekeeper` — combines tech/fund/sent scores, applies risk sizing (volatility-based) and approves candidate trades.
-- `build_portfolio_plan` — allocates capital to approved trades and constructs an order list.
-- `execute_trades_stub` — prints orders to stdout (replace with broker API integration in production).
+ - `fetch_financials` — new tool that downloads basic fundamental metrics (market cap, P/E, revenue) and stores a simple fundamentals table in `invocation_state['fundamentals_df']`.
 
 How the graph flows (simplified):
 
@@ -122,6 +118,11 @@ Project checklist & next tasks
 - [ ] Add unit tests for tools (`pytest`)
 - [ ] Add CI workflow (GitHub Actions) with JDK/Python matrix if needed
 - [ ] Containerize demo (`Dockerfile`) for reproducible CI runs
+ - [x] `requirements.txt` added
+ - [x] Add `fetch_financials` tool (feature/add-financial-data)
+ - [ ] Add unit tests for tools (`pytest`)
+ - [ ] Add CI workflow (GitHub Actions) with JDK/Python matrix if needed
+ - [ ] Containerize demo (`Dockerfile`) for reproducible CI runs
 
 Quick commands for testing 
 

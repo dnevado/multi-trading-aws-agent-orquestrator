@@ -7,3 +7,9 @@ strands>=0.1.0
 
 # Optional / dev
 pytest>=7.0
+requests
+dotenv
+python-dotenv
+gradio
+openai
+openai-agents
