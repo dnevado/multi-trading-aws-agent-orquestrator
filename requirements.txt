@@ -8,4 +8,8 @@ strands>=0.1.0
 # Optional / dev
 pytest>=7.0
 requests
-load_dotenv
+dotenv
+python-dotenv
+gradio
+openai
+openai-agents
