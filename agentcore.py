@@ -900,9 +900,21 @@ def build_graph(agents: Dict[str, Agent]):
     return builder.build()
 
 
-def main():
+def run_workflow(symbols: List[str], openai_key: str) -> Dict[str, Any]:
+    """Run the full trading workflow for the given symbols.
+
+    This function is designed to be reusable from different entry points,
+    including CLI, AWS Lambda, or other schedulers (e.g. EventBridge).
+    """
+    global share_list, openai_api_key
+
+    # Ensure globals used elsewhere (sentiment + fundamentals LLM calls)
+    # are configured from the provided inputs.
+    share_list = symbols
+    openai_api_key = openai_key
+
     # Shared state (passed behind the scenes to all agents/tools)
-    shared_state = {
+    shared_state: Dict[str, Any] = {
         "symbols": share_list,     # "GOOG" also valid, but we pick GOOGL explicitly
         "lookback_days": 200,
         "capital": 100_000,
@@ -912,7 +924,7 @@ def main():
         "long_only": True,
     }
 
-    # Optional: specify a Bedrock model ID string (otherwise defaults apply).  :contentReference[oaicite:4]{index=4}
+    # Optional: specify a Bedrock model ID string (otherwise defaults apply).
     agents = make_agents(model_id=None)
     graph = build_graph(agents)
 
@@ -921,12 +933,56 @@ def main():
         invocation_state=shared_state,
     )
 
-    print(f"\nGraph Status: {result.status}")
-
-    # The final plan is in shared_state (written by tools)
     plan = shared_state.get("trade_plan", {})
+
+    return {
+        "status": str(result.status),
+        "trade_plan": plan,
+    }
+
+
+def main():
+    """CLI entrypoint for local runs.
+
+    Uses the current values of share_list and openai_api_key (typically set
+    from user input in the __main__ block) and prints the resulting plan.
+    """
+    workflow_result = run_workflow(share_list, openai_api_key)
+
+    print(f"\nGraph Status: {workflow_result['status']}")
+
     print("\n=== FINAL TRADE PLAN (JSON) ===")
-    print(json.dumps(plan, indent=2, default=str))
+    print(json.dumps(workflow_result["trade_plan"], indent=2, default=str))
+
+
+def lambda_handler(event, context):
+    """AWS Lambda handler for scheduled (e.g., EventBridge) executions.
+
+    Expected event format (example):
+        {"shares": ["AAPL", "GOOGL", "MSFT"]}
+
+    If "shares" is not provided in the event, this falls back to the
+    SHARE_LIST environment variable, defaulting to "AAPL,GOOGL".
+
+    The OpenAI API key is read from the OPENAI_API_KEY environment variable.
+    """
+    # Shares can be provided directly in the EventBridge event payload
+    shares = event.get("shares") if isinstance(event, dict) else None
+
+    if not shares:
+        # Fallback to environment variable for static configuration
+        shares_env = os.environ.get("SHARE_LIST", "AAPL,GOOGL")
+        shares = [s.strip() for s in shares_env.split(",") if s.strip()]
+
+    # OpenAI API key must be provided via environment in Lambda
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
+
+    workflow_result = run_workflow(shares, openai_key)
+
+    return {
+        "statusCode": 200,
+        "body": json.dumps(workflow_result, default=str),
+    }
 
 
 if __name__ == "__main__":
@@ -943,7 +999,7 @@ if __name__ == "__main__":
         print(f"La clave API de OpenAI existe y empieza por {openai_api_key[:8]}")
     else:
         print("La clave API de OpenAI no existe - Dirígete a la guía de solución de problemas en la carpeta de configuración.")
-    
+
     main()
 
     # out = get_signal("AAPL")
